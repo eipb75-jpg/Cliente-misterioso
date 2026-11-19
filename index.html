@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cliente misterioso – Ficha de visita</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root { --c: #0b5cab; --bg: #f3f5f8; --bd: #d5dbe3; --tx: #1c2430; --mu: #5b6676; }
   * { box-sizing: border-box; }
@@ -64,8 +65,6 @@
       <div><label class="f" for="fecha">Fecha</label><input type="date" id="fecha" required></div>
       <div><label class="f" for="hora">Hora</label><input type="time" id="hora" required></div>
     </div>
-    <label class="f" for="evaluador">Nombre de quien evalúa</label>
-    <input type="text" id="evaluador" autocomplete="name">
     <div class="row">
       <div>
         <label class="f" for="zona">Zona</label>
@@ -273,7 +272,6 @@
     t.push("CLIENTE MISTERIOSO – FICHA DE VISITA");
     t.push("Inspección: " + $("tipo").options[$("tipo").selectedIndex].text);
     t.push("Fecha: " + v("fecha") + "  Hora: " + v("hora"));
-    t.push("Evaluador/a: " + v("evaluador"));
     if ($("tipo").value === "parada") {
       t.push("Zona: " + v("zona"));
       t.push("Parada: " + v("parada"));
@@ -294,6 +292,64 @@
     t.push("");
     t.push("Fotos adjuntas: " + fotos.length);
     return t.join("\n");
+  }
+
+  // Datos de la ficha en forma de tabla
+  function datos() {
+    var g = function (id) { return $(id).value.trim(); };
+    var esP = $("tipo").value === "parada";
+    var base = {
+      "Fecha": g("fecha"),
+      "Hora": g("hora"),
+      "Inspección": $("tipo").options[$("tipo").selectedIndex].text,
+      "Zona": g("zona"),
+      "Servicio": esP ? "" : g("servicio"),
+      "Línea": esP ? "" : g("linea"),
+      "Vehículo": esP ? "" : g("vehiculo"),
+      "Parada / lugar": g("parada")
+    };
+    var crit = CRITERIOS.map(function (c, i) {
+      var r = document.querySelector('input[name="c' + i + '"]:checked');
+      return [c, r ? (r.value === "N/A" ? "N/A" : Number(r.value)) : ""];
+    });
+    return { base: base, crit: crit };
+  }
+
+  // Excel con dos hojas: "Ficha" (una fila) y "Valoraciones" (una fila por criterio).
+  // Si la librería no se ha podido cargar, genera un CSV.
+  function crearExcel(nombre) {
+    var d = datos();
+    var fila = {};
+    Object.keys(d.base).forEach(function (k) { fila[k] = d.base[k]; });
+    d.crit.forEach(function (p) { fila[p[0]] = p[1]; });
+    fila["Observaciones"] = $("obs").value.trim();
+    fila["Nº de fotos"] = fotos.length;
+
+    var largo = d.crit.map(function (p) {
+      return {
+        "Fecha": d.base["Fecha"],
+        "Inspección": d.base["Inspección"],
+        "Zona": d.base["Zona"],
+        "Servicio": d.base["Servicio"],
+        "Línea": d.base["Línea"],
+        "Parada / lugar": d.base["Parada / lugar"],
+        "Criterio": p[0],
+        "Valoración": p[1]
+      };
+    });
+
+    if (window.XLSX) {
+      var wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([fila]), "Ficha");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(largo), "Valoraciones");
+      var out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      return new File([out], nombre + ".xlsx",
+        { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    }
+    var cols = Object.keys(fila);
+    var esc = function (x) { return '"' + String(x == null ? "" : x).replace(/"/g, '""') + '"'; };
+    var csv = "﻿" + cols.map(esc).join(";") + "\n" + cols.map(function (k) { return esc(fila[k]); }).join(";");
+    return new File([csv], nombre + ".csv", { type: "text/csv" });
   }
 
   function faltan() {
@@ -321,23 +377,30 @@
     var archivos = fotos.map(function (x) { return x.file; });
     var sello = ($("fecha").value || "ficha") + "-" + ($("hora").value || "").replace(":", "");
     var txt = new File([texto], "ficha-" + sello + ".txt", { type: "text/plain" });
-    var todos = [txt].concat(archivos);
+    var xl = crearExcel("ficha-" + sello);
 
-    // 1) Compartir desde el móvil (correo, Teams, WhatsApp…) con fotos adjuntas
-    if (navigator.canShare && navigator.canShare({ files: todos }) && navigator.share) {
-      navigator.share({ title: ASUNTO, text: texto, files: todos })
-        .then(function () { aviso("Ficha compartida. Si no has llegado a enviarla, vuelve a pulsar Enviar.", "ok"); })
-        .catch(function (e) { if (e && e.name !== "AbortError") aviso("No se pudo compartir: " + e.message, "err"); });
-      return;
+    // 1) Compartir desde el móvil (correo, Teams, WhatsApp…) con Excel, ficha y fotos.
+    //    Si el móvil no admite algún tipo de archivo, se prueba con menos archivos.
+    var intentos = [[xl, txt].concat(archivos), [xl].concat(archivos), archivos];
+    if (navigator.canShare && navigator.share) {
+      for (var k = 0; k < intentos.length; k++) {
+        if (intentos[k].length && navigator.canShare({ files: intentos[k] })) {
+          navigator.share({ title: ASUNTO, text: texto, files: intentos[k] })
+            .then(function () { aviso("Ficha compartida. Si no has llegado a enviarla, vuelve a pulsar Enviar.", "ok"); })
+            .catch(function (e) { if (e && e.name !== "AbortError") aviso("No se pudo compartir: " + e.message, "err"); });
+          return;
+        }
+      }
     }
 
-    // 2) Alternativa: descargar ficha y fotos, y abrir el correo para adjuntarlas a mano
-    descargar(txt, txt.name);
-    archivos.forEach(function (a, i) { setTimeout(function () { descargar(a, a.name); }, 400 * (i + 1)); });
-    var cuerpo = texto + "\n\n(Adjunta las fotos descargadas.)";
+    // 2) Alternativa: descargar Excel, ficha y fotos, y abrir el correo para adjuntarlos a mano
+    descargar(xl, xl.name);
+    setTimeout(function () { descargar(txt, txt.name); }, 400);
+    archivos.forEach(function (a, i) { setTimeout(function () { descargar(a, a.name); }, 400 * (i + 2)); });
+    var cuerpo = texto + "\n\n(Adjunta el Excel y las fotos descargados.)";
     var url = "mailto:" + encodeURIComponent(EMAIL_DESTINO) + "?subject=" + encodeURIComponent(ASUNTO) + "&body=" + encodeURIComponent(cuerpo);
-    setTimeout(function () { location.href = url; }, 400 * (archivos.length + 2));
-    aviso("Se han descargado la ficha y las fotos. Se abrirá tu correo para que las adjuntes y envíes.", "ok");
+    setTimeout(function () { location.href = url; }, 400 * (archivos.length + 3));
+    aviso("Se han descargado el Excel, la ficha y las fotos. Se abrirá tu correo para que los adjuntes y envíes.", "ok");
   });
 
   $("btnNueva").addEventListener("click", function () {
